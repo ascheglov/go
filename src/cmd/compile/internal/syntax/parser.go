@@ -21,6 +21,8 @@ type parser struct {
 	mode Mode
 	scanner
 
+	injectReturnAfterTry bool
+
 	first  error  // first error encountered
 	pragma Pragma // pragma flags
 
@@ -664,66 +666,60 @@ func (p *parser) callStmt() *CallStmt {
 	return s
 }
 
-// Transform |__try call()| into
-// if __err := call(); __err != nil { return __err }
+// Transforms "__try f()" into "__err = f()".
 func (p *parser) tryStmt() Stmt {
 	if trace {
 		defer p.trace("tryStmt")()
 	}
 
-	try_pos := p.pos()
 	p.next()
-
 	expr := p.pexpr(p.tok == _Lparen) // keep_parens so we can report error below
 	if t := unparen(expr); t != expr {
 		p.error("expression in __try must not be parenthesized")
 		expr = t
 	}
 
-	call_expr, ok := expr.(*CallExpr)
+	callExpr, ok := expr.(*CallExpr)
 	if !ok {
 		p.error("expression in __try must be function call")
-		call_expr = &CallExpr{ Fun: p.bad() }
-		call_expr.pos = expr.Pos()
+		callExpr = &CallExpr{Fun: p.bad()}
+		callExpr.pos = expr.Pos()
 	}
 
-	err_var := &Name{
-		Value: "__err",
+	return &AssignStmt{
+		Op:  0, // '='
+		Lhs: &Name{Value: "__err"},
+		Rhs: callExpr,
 	}
-	err_var.pos = try_pos
+}
 
-	init_stmt := &AssignStmt{
-			Op: Def,
-			Lhs: err_var,
-			Rhs: call_expr,
-		}
-	init_stmt.pos = try_pos
-
-	cond_expr := &Operation{
+// Generates "if __err != nil { return }".
+func (p *parser) tryReturnStmt() Stmt {
+	return &IfStmt{
+		Cond: &Operation{
 			Op: Neq,
-			X: err_var,
-			Y: &Name{
-				Value: "nil",
-			},
-		}
-	cond_expr.pos = try_pos
-
-	return_stmt := &ReturnStmt{
-		Results: err_var,
-	}
-	return_stmt.pos = try_pos
-
-	root := &IfStmt{
-		Init: init_stmt,
-		Cond: cond_expr,
+			X:  &Name{Value: "__err"},
+			Y:  &Name{Value: "nil"},
+		},
 		Then: &BlockStmt{
-			List: []Stmt{ return_stmt },
+			List: []Stmt{&ReturnStmt{}},
 		},
 	}
-	root.pos = try_pos
-	root.Then.pos = try_pos
+}
 
-	return root
+// Adds "__err" to LHS if there is the "__try" keyword.
+func (p *parser) maybeParseTryRhs(lhsOrig Expr) (lhs Expr, rhs Expr) {
+	if p.tok != _Try {
+		return lhsOrig, p.exprList()
+	}
+	p.next()
+	p.injectReturnAfterTry = true
+	lhsList, ok := lhsOrig.(*ListExpr)
+	if !ok {
+		lhsList = &ListExpr{ElemList: []Expr{lhsOrig}}
+	}
+	lhsList.ElemList = append(lhsList.ElemList, &Name{Value: "__err"})
+	return lhsList, p.exprList()
 }
 
 // Operand     = Literal | OperandName | MethodExpr | "(" Expression ")" .
@@ -1628,7 +1624,8 @@ func (p *parser) simpleStmt(lhs Expr, rangeOk bool) SimpleStmt {
 		}
 
 		// expr_list '=' expr_list
-		return p.newAssignStmt(pos, 0, lhs, p.exprList())
+		lhs, rhs := p.maybeParseTryRhs(lhs)
+		return p.newAssignStmt(pos, 0, lhs, rhs)
 
 	case _Define:
 		p.next()
@@ -1639,7 +1636,7 @@ func (p *parser) simpleStmt(lhs Expr, rangeOk bool) SimpleStmt {
 		}
 
 		// expr_list ':=' expr_list
-		rhs := p.exprList()
+		lhs, rhs := p.maybeParseTryRhs(lhs)
 
 		if x, ok := rhs.(*TypeSwitchGuard); ok {
 			switch lhs := lhs.(type) {
@@ -2076,6 +2073,7 @@ func (p *parser) stmtOrNil() Stmt {
 		return p.callStmt()
 
 	case _Try:
+		p.injectReturnAfterTry = true
 		return p.tryStmt()
 
 	case _Goto:
@@ -2116,6 +2114,10 @@ func (p *parser) stmtList() (l []Stmt) {
 			break
 		}
 		l = append(l, s)
+		if p.injectReturnAfterTry {
+			l = append(l, p.tryReturnStmt())
+			p.injectReturnAfterTry = false
+		}
 		// customized version of osemi:
 		// ';' is optional before a closing ')' or '}'
 		if p.tok == _Rparen || p.tok == _Rbrace {

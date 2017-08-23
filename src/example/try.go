@@ -3,18 +3,24 @@ package main
 import "fmt"
 import "errors"
 
-func g() error {
-	return errors.New("OMG")
+func h() (int, error) {
+	return 0, errors.New("OMG")
 }
 
-func f() error {
-	fmt.Println("before try")
-	__try g() // MAGIC!
+func g() (__err error) {
+	x := __try h() // assignment
+	fmt.Println("not reached", x)
+	return
+}
+
+func f() (__err error) {
+	__try g() // statement
 	fmt.Println("not reached")
-	return nil
+	return
 }
 
 func main() {
+	fmt.Println("start")
 	err := f()
 	fmt.Println("done, error: ", err)
 }
@@ -22,6 +28,6 @@ func main() {
 // Expected output:
 //
 // $ go run example/try.go
-// before try
+// start
 // done, error:  OMG
 //
