@@ -180,6 +180,7 @@ const stopset uint64 = 1<<_Break |
 	1<<_Return |
 	1<<_Select |
 	1<<_Switch |
+	1<<_Try |
 	1<<_Type |
 	1<<_Var
 
@@ -661,6 +662,68 @@ func (p *parser) callStmt() *CallStmt {
 
 	s.Call = cx
 	return s
+}
+
+// Transform |__try call()| into
+// if __err := call(); __err != nil { return __err }
+func (p *parser) tryStmt() Stmt {
+	if trace {
+		defer p.trace("tryStmt")()
+	}
+
+	try_pos := p.pos()
+	p.next()
+
+	expr := p.pexpr(p.tok == _Lparen) // keep_parens so we can report error below
+	if t := unparen(expr); t != expr {
+		p.error("expression in __try must not be parenthesized")
+		expr = t
+	}
+
+	call_expr, ok := expr.(*CallExpr)
+	if !ok {
+		p.error("expression in __try must be function call")
+		call_expr = &CallExpr{ Fun: p.bad() }
+		call_expr.pos = expr.Pos()
+	}
+
+	err_var := &Name{
+		Value: "__err",
+	}
+	err_var.pos = try_pos
+
+	init_stmt := &AssignStmt{
+			Op: Def,
+			Lhs: err_var,
+			Rhs: call_expr,
+		}
+	init_stmt.pos = try_pos
+
+	cond_expr := &Operation{
+			Op: Neq,
+			X: err_var,
+			Y: &Name{
+				Value: "nil",
+			},
+		}
+	cond_expr.pos = try_pos
+
+	return_stmt := &ReturnStmt{
+		Results: err_var,
+	}
+	return_stmt.pos = try_pos
+
+	root := &IfStmt{
+		Init: init_stmt,
+		Cond: cond_expr,
+		Then: &BlockStmt{
+			List: []Stmt{ return_stmt },
+		},
+	}
+	root.pos = try_pos
+	root.Then.pos = try_pos
+
+	return root
 }
 
 // Operand     = Literal | OperandName | MethodExpr | "(" Expression ")" .
@@ -2011,6 +2074,9 @@ func (p *parser) stmtOrNil() Stmt {
 
 	case _Go, _Defer:
 		return p.callStmt()
+
+	case _Try:
+		return p.tryStmt()
 
 	case _Goto:
 		s := new(BranchStmt)

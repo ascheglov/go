@@ -62,6 +62,7 @@ const (
 	_Select
 	_Struct
 	_Switch
+	_Try
 	_Type
 	_Var
 
@@ -134,6 +135,7 @@ var tokstrings = [...]string{
 	_Select:      "select",
 	_Struct:      "struct",
 	_Switch:      "switch",
+	_Try:         "__try",
 	_Type:        "type",
 	_Var:         "var",
 }
